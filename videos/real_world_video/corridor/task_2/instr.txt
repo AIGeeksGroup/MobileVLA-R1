@@ -1,0 +1,1 @@
+Starting from the initial position, walk forward until you find a trash can, stop in front of it, and then greet it.

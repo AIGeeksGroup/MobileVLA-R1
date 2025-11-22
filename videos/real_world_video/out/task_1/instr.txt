@@ -1,0 +1,1 @@
+Starting from your initial position, walk to the right and find a black bicycle. Once you find it, sit down next to it.

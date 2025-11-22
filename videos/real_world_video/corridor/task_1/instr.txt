@@ -1,0 +1,1 @@
+Starting from the initial position, walk forward to find a cardboard box, stop in front of it, and lie down.

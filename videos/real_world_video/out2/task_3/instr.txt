@@ -1,0 +1,1 @@
+Starting from the initial position, walk straight forward to the stone block and stop, then jump forward.
