@@ -10,6 +10,11 @@ This is the official repository for the paper:
 > ### [Paper](https://arxiv.org/abs/2511.17889) | [Website](https://aigeeksgroup.github.io/MobileVLA-R1/) | [Data](https://huggingface.co/datasets/AIGeeksGroup/MobileVLA-CoT) | [Models](https://huggingface.co/AIGeeksGroup/MobileVLA-R1) | [HF Paper](https://huggingface.co/papers/2511.17889)
 
 
+
+https://github.com/user-attachments/assets/b167ebe6-cd72-470f-9b54-07e6e0989a4e
+
+
+
 ## ✏️ Citation
 If you find our code or paper helpful, please consider starring ⭐ us and citing:
 ```bibtex
