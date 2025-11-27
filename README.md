@@ -1,4 +1,4 @@
-# <img src="./assets/mobilevlar1_logo.png" alt="logo" width="25"/> MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots
+# <img src="./assets/mobilevlar1_logo.png" alt="logo" width="40"/> MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots
 
 This is the official repository for the paper:
 > **MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots**
