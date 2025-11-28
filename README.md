@@ -18,11 +18,11 @@ https://github.com/user-attachments/assets/b167ebe6-cd72-470f-9b54-07e6e0989a4e
 ## ✏️ Citation
 If you find our code or paper helpful, please consider starring ⭐ us and citing:
 ```bibtex
-@article{huang2025mobile,
-      title={MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots}, 
-      author={Ting, Huang and Dongjian, Li and Rui, Yang and Zeyu, Zhang and Zida, Yang and Hao, Tang},
-      journal={arXiv preprint arXiv:2511.17889},
-      year={2025}
+@article{huang2025mobilevla,
+  title={MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots},
+  author={Huang, Ting and Li, Dongjian and Yang, Rui and Zhang, Zeyu and Yang, Zida and Tang, Hao},
+  journal={arXiv preprint arXiv:2511.17889},
+  year={2025}
 }
 ```
 
