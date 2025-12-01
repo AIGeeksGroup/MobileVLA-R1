@@ -41,6 +41,10 @@ Real-world deployment on a quadruped robot validates robust performance in compl
 
 ![image](./assets/structure.png)
 
+## 📰 News
+
+<b>2025/11/27:</b> 🎉 Our paper has been shared by <a href="https://x.com/_akhaliq/status/1993983918551322807"><b>AK</b></a>.
+
 
 ## TODO List
 
