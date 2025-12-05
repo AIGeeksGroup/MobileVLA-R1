@@ -53,7 +53,7 @@ Real-world deployment on a quadruped robot validates robust performance in compl
 
 - [x] Upload our paper to arXiv and build project pages.
 - [x] Release MobileVLA-CoT dataset.
-- [ ] Upload the code.
+- [x] Upload the code.
 
 ## 📦 Data Preparation
 
