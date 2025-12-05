@@ -1,0 +1,15 @@
+---
+BASE_TASK_CONFIG_PATH: habitat_extensions/config/vlnce_task.yaml
+TRAINER_NAME: navila
+SIMULATOR_GPU_IDS: [0]
+TORCH_GPU_ID: 0
+NUM_ENVIRONMENTS: 1
+EVAL_CKPT_PATH_DIR: data/checkpoint-2000
+RESULTS_DIR: eval_out/
+# VILA args
+CONV_TYPE: llama_3
+
+EVAL:
+    USE_CKPT_CONFIG: false
+    SPLIT: val_unseen
+    EPISODE_COUNT: -1

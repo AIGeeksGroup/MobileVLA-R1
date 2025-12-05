@@ -1,0 +1,15 @@
+attrs>=19.1.0
+dtw==1.4.0
+fastdtw==0.3.4
+gdown
+gym==0.17.3
+jsonlines
+lmdb
+msgpack_numpy
+networkx
+numpy>=1.16.1
+Opencv-python>=3.3.0
+tb-nightly
+tensorflow
+tqdm>=4.0.0
+yacs>=0.1.5

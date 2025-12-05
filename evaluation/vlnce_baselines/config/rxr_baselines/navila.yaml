@@ -1,0 +1,28 @@
+---
+BASE_TASK_CONFIG_PATH: habitat_extensions/config/rxr_vlnce_english_task.yaml
+TRAINER_NAME: navila
+SIMULATOR_GPU_IDS: [0]
+TORCH_GPU_ID: 0
+NUM_ENVIRONMENTS: 1
+RESULTS_DIR: eval_out/
+
+INFERENCE:
+    SPLIT: test_challenge
+    LANGUAGES: [en-US]
+    SAMPLE: true
+    USE_CKPT_CONFIG: false
+    CKPT_PATH: data/checkpoints/ckpt.0.pth # REPLACE THIS
+    PREDICTIONS_FILE: rxr_cma_en_test_challenge.jsonl
+    FORMAT: rxr
+
+EVAL:
+    USE_CKPT_CONFIG: false
+    SPLIT: val_unseen
+    LANGUAGES: [en-US]
+    EPISODE_COUNT: -1
+    SAMPLE: true
+
+RL:
+    POLICY:
+        OBS_TRANSFORMS:
+            ENABLED_TRANSFORMS: [ResizeShortestEdge, CenterCropperPerSensor]

@@ -1,0 +1,151 @@
+---
+cinepile:
+    tags:
+        - local
+
+egoschema:
+    tags:
+        - local
+
+egoschema_full:
+    tags:
+        - submission
+
+lmms-ai2d:
+    tags:
+        - local
+    metrics:
+        accuracy: results/ai2d/exact_match,flexible-extract
+
+lmms-chartqa:
+    tags:
+        - local
+    metrics:
+        overall: results/chartqa/relaxed_overall,none
+        human: results/chartqa/relaxed_human_split,none
+        augmented: results/chartqa/relaxed_augmented_split,none
+
+lmms-docvqa_test:
+    tags:
+        - submission
+
+lmms-docvqa_val:
+    tags:
+        - local
+    metrics:
+        accuracy: results/docvqa_val/anls,none
+
+lmms-gqa:
+    tags:
+        - local
+        - regression
+    metrics:
+        accuracy: results/gqa/exact_match,none
+
+lmms-llava-in-the-wild:
+    tags:
+        - openai
+
+lmms-mmbench:
+    tags:
+        - submission
+
+lmms-mme:
+    tags:
+        - local
+        - regression
+    metrics:
+        cognition: results/mme/mme_cognition_score,none
+        perception: results/mme/mme_percetion_score,none
+
+lmms-mmmu_test:
+    tags:
+        - submission
+
+lmms-mmmu_val:
+    tags:
+        - local
+        - regression
+    metrics:
+        accuracy: results/mmmu_val/mmmu_acc,none
+
+lmms-mmvet:
+    tags:
+        - openai
+
+lmms-ocrbench:
+    tags:
+        - local
+    metrics:
+        accuracy: results/ocrbench/ocrbench_accuracy,none
+
+lmms-pope:
+    tags:
+        - local
+        - regression
+    metrics:
+        accuracy: results/pope/pope_accuracy,none
+        precision: results/pope/pope_precision,none
+        recall: results/pope/pope_recall,none
+        f1: results/pope/pope_f1_score,none
+
+lmms-realworldqa:
+    tags:
+        - local
+    metrics:
+        accuracy: results/realworldqa/exact_match,flexible-extract
+
+lmms-seedbench:
+    tags:
+        - local
+        - regression
+    metrics:
+        all: results/seedbench/seed_all,none
+        image: results/seedbench/seed_image,none
+        video: results/seedbench/seed_video,none
+
+lmms-scienceqa_full:
+    tags:
+        - local
+        - regression
+    metrics:
+        full: results/scienceqa/exact_match,none
+        image: results/scienceqa_img/exact_match,none
+
+lmms-vizwiz_vqa_test:
+    tags:
+        - submission
+
+lmms-vizwiz_vqa_val:
+    tags:
+        - local
+    metrics:
+        accuracy: results/vizwiz_vqa_val/exact_match,none
+
+lmms-vqav2_test:
+    tags:
+        - submission
+
+lmms-vqav2_val:
+    tags:
+        - local
+
+mathvista-test:
+    tags:
+        - submission
+
+mathvista-testmini:
+    tags:
+        - local
+
+mmmu-test:
+    tags:
+        - submission
+
+mmmu-validation:
+    tags:
+        - local
+
+textvqa:
+    tags:
+        - local
