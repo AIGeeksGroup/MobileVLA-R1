@@ -35,6 +35,14 @@ _C.EVAL.EVAL_NONLEARNING = False
 _C.EVAL.NONLEARNING = CN()
 _C.EVAL.NONLEARNING.AGENT = "RandomAgent"
 
+_C.MOBILEVLA = CN()
+_C.MOBILEVLA.ENABLED = False
+_C.MOBILEVLA.MAX_NEW_TOKENS = 1024
+# Explicitly select simulator depth or a callable that predicts depth from RGB.
+_C.MOBILEVLA.DEPTH_SOURCE = "none"
+_C.MOBILEVLA.DEPTH_PROVIDER = ""  # module:function, returning an H x W depth array
+_C.MOBILEVLA.POINT_COUNT = 2048
+
 # ----------------------------------------------------------------------------
 # INFERENCE CONFIG
 # ----------------------------------------------------------------------------

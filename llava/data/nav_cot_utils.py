@@ -8,19 +8,8 @@ from PIL import Image
 
 
 def normalize_nav_path(raw_path: str, override_root: Optional[str] = None) -> str:
-    """Normalize MP3D-style Windows paths to the current platform."""
-
-    path = Path(str(raw_path).replace("\\", "/"))
-    if override_root is None:
-        return str(path)
-
-    relative = path
-    if "scans" in path.parts:
-        idx = path.parts.index("scans")
-        relative = Path(*path.parts[idx + 1 :])
-    elif len(path.parts) > 1:
-        relative = Path(*path.parts[1:])
-    return str(Path(override_root) / relative)
+    from mobilevla.data import normalize_path
+    return normalize_path(raw_path, override_root)
 
 
 def load_depth_map(depth_path: str, scale: float = 1000.0) -> torch.Tensor:

@@ -1,0 +1,19 @@
+BASE_TASK_CONFIG_PATH: habitat_extensions/config/vlnce_task.yaml
+TRAINER_NAME: navila
+SIMULATOR_GPU_IDS: [0]
+TORCH_GPU_ID: 0
+NUM_ENVIRONMENTS: 1
+EVAL_CKPT_PATH_DIR: data/mobilevla-checkpoint
+RESULTS_DIR: eval_out/
+CONV_TYPE: llama_3
+EVAL:
+    USE_CKPT_CONFIG: false
+    SPLIT: val_unseen
+    EPISODE_COUNT: -1
+MOBILEVLA:
+    ENABLED: true
+    MAX_NEW_TOKENS: 1024
+    # Set a depth estimator callable or explicitly choose simulator depth.
+    DEPTH_SOURCE: provider
+    DEPTH_PROVIDER: ""
+    POINT_COUNT: 2048

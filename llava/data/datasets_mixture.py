@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import warnings
 from dataclasses import dataclass, field
 
@@ -126,7 +127,7 @@ def register_datasets_mixtures():
     cot = Dataset(
         dataset_name="cot",
         dataset_type="vlnce",
-        data_path="/root/autodl-tmp/dataset/CoT/annotations.json",
+        data_path=os.getenv("COT_DATA", "/root/autodl-tmp/dataset/CoT/annotations.json"),
         image_path="/root/autodl-tmp/dataset/CoT/train/",
         description="560K Real augmented, no direction is included. (augmented aith duplicate stops only - 5x)",
     )
@@ -135,8 +136,12 @@ def register_datasets_mixtures():
     nav_cot_vln = Dataset(
         dataset_name="nav_cot_vln",
         dataset_type="vlnce",
-        data_path="Nav_CoT_FINAL_38K.jsonl",
+        data_path=os.getenv("NAV_COT_DATA", "Nav_CoT_FINAL_38K.jsonl"),
         image_path=None,
         description="Navigation CoT data built on MP3D scenes with multi-sensor cues.",
     )
     add_dataset(nav_cot_vln)
+    for name, variable in (("cot_episode", "COT_EPISODE_DATA"), ("cot_step", "COT_STEP_DATA")):
+        add_dataset(Dataset(dataset_name=name, dataset_type="vlnce",
+                            data_path=os.getenv(variable), image_path=None,
+                            description="Validated MobileVLA-CoT annotations; set " + variable))

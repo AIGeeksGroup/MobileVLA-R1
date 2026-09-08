@@ -45,6 +45,10 @@ Real-world deployment on a quadruped robot validates robust performance in compl
 
 ## 📰 News
 
+<b>2026/09/06:</b> 🚀 We introduce <a href="https://github.com/AIGeeksGroup/MobileVLA-R1-2.0"><b>MobileVLA-R1 2.0</b></a>!
+
+<b>2026/06/18:</b> 🎉 MobileVLA-R1 has been accepted to <b>ECCV 2026</b>!
+
 <b>2025/12/05:</b> 📣 Our paper has been promoted by <a href="https://mp.weixin.qq.com/s/d9y8Rchx7ZHqfIEIwfmy4A"><b>AI Era</b></a>.
 
 <b>2025/11/30:</b> 🔔 Our paper has been promoted by <a href="https://mp.weixin.qq.com/s/xwNx1-yGbCOwUiVjJ3_IKA"><b>Embodied Intelligent Mind</b></a>.
@@ -59,28 +63,25 @@ Real-world deployment on a quadruped robot validates robust performance in compl
 
 ## 📦 Data Preparation
 
-Our pipeline expects three synchronized modalities per observation: RGB frames (MP3D skybox crops), Depth Anything v2 maps, and point clouds derived from the depth maps. The default dataset used in this repo is `Nav_CoT_FINAL_38K.jsonl`, which augments R2R/RxR trajectories with CoT reasoning.
+The corrected code uses a shared final-answer contract. Existing annotations can be downloaded from [MobileVLA-CoT](https://huggingface.co/datasets/AIGeeksGroup/MobileVLA-CoT); provide actual local annotation and observation paths. The repository does not bundle images, depth maps, or model weights.
 
-1. **Download CoT annotations**
-   ```bash
-   wget https://your-storage/Nav_CoT_FINAL_38K.jsonl -O ./Nav_CoT_FINAL_38K.jsonl
-   ```
-2. **Extract RGB frames**
-   - Clone Matterport3D scans or reuse the official MP3D release.
-   - Create a root folder (e.g. `/root/autodl-tmp/dataset/NavCoT/frames`) that mirrors the path structure in the JSONL file. The loader automatically rewrites Windows-style paths via `navcot_image_root`.
-3. **Generate Depth Anything v2 maps**
-   - Run Depth Anything v2 on each RGB frame and save the outputs (`png`, `npy`, or `pt`) under `/root/autodl-tmp/dataset/NavCoT/depth`.
-   - Name each depth file with the same basename as its RGB frame so the loader can resolve it.
-4. **(Optional) Pre-compute point clouds**
-   - The training code can derive point clouds on the fly from depth maps. If you have higher-quality `.npy` point sets, place them next to your depth files and pass their path through `navcot_use_point`.
+- Navigation: `<think>reasoning</think><answer>turn left 30 degree</answer>` (also forward in cm, right, stop).
+- Control: `<think>reasoning</think><answer>{"velocity": [0.3, 0.0, 0.0], "action": "go forward"}</answer>`.
+- Episode: `task_type: "episode"` with reasoning and an episode-level textual answer.
 
-Key CLI arguments controlling the data loader live in `llava/train/args.py`, notably:
-- `--navcot_image_root`, `--navcot_depth_root`, `--navcot_depth_format`, `--navcot_depth_scale`
-- `--navcot_use_depth`, `--navcot_use_point`, `--navcot_pointcloud_points`, `--navcot_depth_frames`
+Legacy navigation `<action>` tags are normalized. Legacy 12-number control vectors require a separate `action_label` from the dataset: the first three entries become velocity, and the label supplies the discrete action. The remaining nine gait/body parameters are **not** optimized by this paper-level four-component contract. Do not infer missing action labels from reasoning text or treat malformed targets as zero velocity.
 
-These options also apply to GRPO generation via environment variables (see below).
+Normalize and validate the existing annotations without loading any model:
 
+```bash
+python scripts/prepare_cot_annotations.py --input /path/episode.json --output /path/episode.jsonl --task episode
+python scripts/prepare_cot_annotations.py --input /path/nav.jsonl --output /path/nav-normalized.jsonl --task navigation
+python scripts/prepare_cot_annotations.py --input /path/step.json --output /path/step-10k.jsonl --task control --limit 10000
+```
 
+The script rejects malformed records and any explicit non-training split. It cannot establish split provenance when the source omits that metadata. It preserves image paths, so resolve the dataset's official train split and scene mapping before use.
+
+Use synchronized RGB and single-channel depth maps under parallel roots, e.g. `rgb/scene/frame.jpg` and `depth/scene/frame.png`. Paths relative to the roots are preferred; MP3D Windows paths containing `scans/` are supported. Missing observations raise errors. Depth Anything v2 maps must be generated externally; the in-model depth encoder is a CNN over those maps, and the point encoder remains a lightweight TransformerEncoder implementation. `navcot_use_point` derives points from depth rather than specifying a point-file path.
 
 ## ⚙️ Environment Setup
 
@@ -102,46 +103,71 @@ If you manage environments manually, replicate the same steps (torch 2.3 + CUDA 
 
 ## 🚀 Training
 
-### Stage 1: Supervised CoT Alignment (SFT)
+The following commands are entry points for later execution. The implementation repair was checked without starting training or model inference. See [repair status and remaining validation](docs/implementation_fixes.md).
 
-Run the provided LoRA script, which already enables the depth/point encoders and mixes MobileVLA-CoT with the Nav-CoT JSONL:
+### Stage 1: Supervised CoT Alignment
+
+The explicit cold-start pipeline performs Episode+Nav SFT, merges the adapter into a full checkpoint, then performs Step-10K SFT and exports a full checkpoint containing all modalities.
 
 ```bash
-WANDB_MODE=offline \
-bash scripts/train/sft_8frames.sh \
-  --data_mixture cot+nav_cot_vln \
-  --navcot_image_root /root/autodl-tmp/dataset/NavCoT/frames \
-  --navcot_depth_root /root/autodl-tmp/dataset/NavCoT/depth \
-  --navcot_use_depth True \
-  --navcot_use_point True
+export MODEL_PATH=/path/to/navila-full-model
+export COT_EPISODE_DATA=/path/episode.jsonl
+export NAV_COT_DATA=/path/nav-normalized.jsonl
+export COT_STEP_DATA=/path/step-10k.jsonl
+export NAVCOT_IMAGE_ROOT=/path/rgb
+export NAVCOT_DEPTH_ROOT=/path/depth
+export RUN_ROOT=./checkpoints/cold-start
+bash scripts/train/sft_cold_start.sh
 ```
 
-Feel free to override any argument defined inside `scripts/train/sft_8frames.sh` for your cluster (batch size, LoRA rank, dataset paths, etc.).
+For a single SFT job use `scripts/train/sft_8frames.sh`; trailing arguments override its defaults. The cold-start wrapper controls each stage's model/output/mixture paths. The current VLN payload collator requires `seq_parallel_size=1`.
 
-### Stage 2: GRPO Reinforcement Learning
+To export an adapter independently:
 
-1. **Reference model server**
-   ```bash
-   python ref_server.py
-   ```
-2. **Policy fine-tuning with DeepSpeed**
-   ```bash
-   deepspeed train.py
-   ```
-3. **Generative worker with multi-modal inputs**
-   ```bash
-   GEN_DATASET=/root/autodl-tmp/Nav_CoT_FINAL_38K.jsonl \
-   NAVCOT_IMAGE_ROOT=/root/autodl-tmp/dataset/NavCoT/frames \
-   NAVCOT_DEPTH_ROOT=/root/autodl-tmp/dataset/NavCoT/depth \
-   NAVCOT_USE_POINT=1 \
-   python gen_worker.py
-   ```
+```bash
+python merge.py --base-model /path/base --lora-path /path/adapter --output-dir /path/full-model
+```
 
-The worker instantiates `NaVILAImageInference`, streams RGB/Depth/Point payloads into the policy, scores candidates via the reward calculator, and pushes normalized rewards plus log-probs back to the reference server. `train.py` consumes those batches and performs GRPO updates with periodic model refreshes for the generator.
+The merged checkpoint includes `auxiliary_model.bin` for depth/point encoders and bridges. Old exports that omitted these weights must be rebuilt from an intact SFT adapter/non-LoRA checkpoint; missing weights cannot be recovered from the config alone.
 
+### Stage 2: GRPO
 
+Use the **same exported full model directory**, group size, and shared update directory for all processes. Protocol v2 replaces the old text-only transport: restart all three processes together after upgrading. Each process below uses one visible GPU; the trainer currently supports one rank.
 
+```bash
+export MODEL_PATH=/path/to/cold-start/sft-model
+# Terminal 1: permanently frozen reference model
+CUDA_VISIBLE_DEVICES=0 python ref_server.py
+# Terminal 2: publish versioned sampling weights and update the full policy
+CUDA_VISIBLE_DEVICES=1 deepspeed --num_gpus=1 train.py --updates ./model_updates --group-size 3
+# Terminal 3: sample from the published policy using exactly recorded observations
+CUDA_VISIBLE_DEVICES=2 python gen_worker.py --dataset /path/control-or-nav.jsonl \
+  --image-root /path/rgb --depth-root /path/depth --updates ./model_updates --group-size 3
+```
 
+The worker keeps complete response groups, computes group advantages once, and sends the exact prompt IDs, RGB/depth/point tensors, completion IDs/masks and old-policy probabilities. Current and reference probabilities use the same multimodal expansion and causal token alignment. EOS is included even when it shares the padding token ID. The trainer refreshes the actual sampling model and rejects groups from old runs/published versions. Checkpoints use the full multimodal export path.
+
+Control rewards compare velocity directions and explicit action labels plus the reasoning/answer format. Navigation records use action and format rewards; no synthetic velocity target is invented for text navigation actions. This navigation-specific extension should be distinguished from the paper's continuous-control reward when reporting experiments.
+
+### Evaluation and remote API
+
+New evaluation configs are `evaluation/vlnce_baselines/config/{r2r_baselines,rxr_baselines}/mobilevla.yaml`. They enable CoT-aware final-answer parsing and a larger generation budget. Original `navila.yaml` configs retain baseline behavior.
+
+For a depth/point model, explicitly configure `MOBILEVLA.DEPTH_SOURCE`:
+
+- `provider`: set `MOBILEVLA.DEPTH_PROVIDER` to `your_module:predict_depth`. The callable receives an RGB array and returns one finite H×W depth map, in the same units/convention used for training. Initialize/cache the chosen external depth estimator in that module.
+- `simulator`: use the Habitat depth sensor. This is an explicitly different observation source from Depth Anything v2, so its results must be labelled accordingly.
+
+The remote API accepts optional `depth_maps` uploads, `derive_points`, and `task` (`navigation` or `control`). It returns parsed action/velocity alongside the text; it does not execute robot commands. Unitree SDK integration and QUARD environment success evaluation still require the actual robot/environment interfaces and are not supplied by this patch.
+
+### Checks without models
+
+```bash
+python -m unittest discover -s tests -v
+bash -n scripts/train/sft_8frames.sh scripts/train/sft_cold_start.sh
+```
+
+The tests use pure parsing/path/data logic and optional synthetic tensor arithmetic only; they do not load a model, run generation, or train. Tensor checks are skipped when PyTorch is absent.
 
 ## 🌟 Star History
 

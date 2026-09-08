@@ -6,7 +6,6 @@ import argparse
 import numpy as np
 from PIL import Image
 import warnings
-warnings.filterwarnings("ignore")
 
 from llava.model import *
 from llava.data.nav_cot_utils import depth_to_point_cloud, load_depth_map
@@ -14,6 +13,8 @@ from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates
 from llava.mm_utils import process_image, tokenizer_image_token
 from peft import PeftModel
+from mobilevla.checkpoints import load_non_lora
+from mobilevla.data import observation_question
 
 
 class NaVILAImageInference:
@@ -51,6 +52,10 @@ class NaVILAImageInference:
         # Load config from LoRA path if provided, otherwise from base model
         if self.lora_path and os.path.exists(self.lora_path):
             config = LlavaLlamaConfig.from_pretrained(self.lora_path)
+            base_config = LlavaLlamaConfig.from_pretrained(self.model_path)
+            for key in ('llm_cfg', 'vision_tower_cfg', 'mm_projector_cfg'):
+                setattr(config, key, getattr(base_config, key))
+            config.auxiliary_weights_file = getattr(base_config, 'auxiliary_weights_file', None)
         else:
             config = LlavaLlamaConfig.from_pretrained(self.model_path)
         
@@ -62,7 +67,7 @@ class NaVILAImageInference:
         
         model_kwargs = {
             "config": config,
-            "device_map": "auto",
+            "device_map": {"": self.device},
             "trust_remote_code": True,
         }
         
@@ -87,15 +92,14 @@ class NaVILAImageInference:
                 **model_kwargs
             )
         
-        model = model.to(torch.bfloat16)
+        model = model.to(device=self.device, dtype=torch.bfloat16)
         
         if self.lora_path and os.path.exists(self.lora_path):
             print(f"Loading LoRA weights from {self.lora_path}...")
             
             non_lora_path = os.path.join(self.lora_path, "non_lora_trainables.bin")
             if os.path.exists(non_lora_path):
-                non_lora_weights = torch.load(non_lora_path, map_location="cpu")
-                model.load_state_dict(non_lora_weights, strict=False)
+                load_non_lora(model, non_lora_path)
                 print("Loaded non-LoRA trainables")
             
             model = PeftModel.from_pretrained(
@@ -110,7 +114,9 @@ class NaVILAImageInference:
         self.tokenizer = model.tokenizer
         
         if hasattr(self.tokenizer, 'pad_token') and self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.unk_token
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self.tokenizer.pad_token_id is None:
+            raise ValueError("Tokenizer must define a pad or EOS token")
             
     def _setup_conversation(self):
         """Configure the conversation template used for inference."""
@@ -121,24 +127,28 @@ class NaVILAImageInference:
     def _prepare_depth_tensor(self, depth_input):
         if depth_input is None:
             return None
-        if isinstance(depth_input, (str, Path)):
+        if isinstance(depth_input, (str, Path, torch.Tensor)):
             depth_input = [depth_input]
         tensors = []
         for item in depth_input:
-            if isinstance(item, torch.Tensor):
-                tensor = item
-                if tensor.dim() == 3:
-                    tensor = tensor.unsqueeze(0)
-            else:
-                tensor = load_depth_map(str(item), scale=self.depth_scale)
+            tensor = item if isinstance(item, torch.Tensor) else load_depth_map(str(item), scale=self.depth_scale)
+            if tensor.dim() == 2:
+                tensor = tensor.unsqueeze(0).unsqueeze(0)
+            elif tensor.dim() == 3:
+                tensor = tensor.unsqueeze(0)
+            if tensor.dim() != 4 or tensor.shape[1] != 1 or not torch.isfinite(tensor).all():
+                raise ValueError("Depth maps must be finite tensors with shape (B, 1, H, W)")
             tensors.append(tensor)
-        depth_tensor = torch.cat(tensors, dim=0)
-        return depth_tensor.to(self.device, dtype=torch.bfloat16)
+        if not tensors:
+            raise ValueError("Depth input is empty")
+        return torch.cat(tensors, dim=0).to(self.device, dtype=torch.bfloat16)
 
     def _prepare_point_tensor(self, point_input, depth_tensor=None):
         if point_input is None and depth_tensor is None:
             return None
-        if point_input == "from_depth" and depth_tensor is not None:
+        if isinstance(point_input, str) and point_input == "from_depth":
+            if depth_tensor is None:
+                raise ValueError("from_depth requires a depth tensor")
             pcs = []
             for depth_map in depth_tensor:
                 pc = depth_to_point_cloud(
@@ -150,6 +160,10 @@ class NaVILAImageInference:
             point_tensor = torch.stack(pcs)
             return point_tensor.to(self.device, dtype=torch.bfloat16)
         if isinstance(point_input, torch.Tensor):
+            if point_input.dim() == 2:
+                point_input = point_input.unsqueeze(0)
+            if point_input.dim() != 3 or point_input.shape[-1] != 3:
+                raise ValueError("Point clouds must have shape (B, N, 3)")
             return point_input.to(self.device, dtype=torch.bfloat16)
         if isinstance(point_input, (str, Path)):
             data = np.load(str(point_input))
@@ -221,24 +235,14 @@ class NaVILAImageInference:
         
         return torch.stack(image_tensors)
     
-    def generate_response(
-        self,
-        image_input,
-        question,
-        max_new_tokens=512,
-        temperature=0.7,
-        top_p=0.9,
-        do_sample=True,
-        depth_input=None,
-        point_cloud=None,
-        return_token_ids=False,
-    ):
-        """Generate a response with optional depth and point-cloud inputs."""
-        
-        if isinstance(image_input, str):
+    def prepare_observation(self, image_input, question, depth_input=None, point_cloud=None):
+        """Prepare one immutable observation shared by all responses in a group."""
+        if isinstance(image_input, (str, Path)):
             image_tensors = self.load_image(image_input)
             num_images = 1
         elif isinstance(image_input, list):
+            if not image_input:
+                raise ValueError("At least one RGB observation is required")
             image_tensors = self.load_multiple_images(image_input)
             num_images = len(image_input)
         elif isinstance(image_input, torch.Tensor):
@@ -247,16 +251,17 @@ class NaVILAImageInference:
         else:
             raise ValueError("image_input must be a path, list of paths, or tensor")
         
+        if image_tensors.ndim == 3:
+            image_tensors = image_tensors.unsqueeze(0)
+        if image_tensors.ndim != 4 or image_tensors.shape[1] != 3 or num_images == 0:
+            raise ValueError("RGB observations must have shape (B, 3, H, W)")
         conv = conv_templates[self.conv_mode].copy()
         
         depth_tensor = self._prepare_depth_tensor(depth_input)
         point_tensor = self._prepare_point_tensor(point_cloud, depth_tensor)
         payload = self._build_image_payload(image_tensors, depth_tensor, point_tensor)
-        token_block = ""
-        if len(payload["token_types"]) > 0:
-            token_block = "\n".join([DEFAULT_IMAGE_TOKEN for _ in payload["token_types"]]) + "\n"
-        question_with_image = f"{token_block}{question}"
-        
+        question_with_image = observation_question(question, payload["token_types"])
+
         conv.append_message(conv.roles[0], question_with_image)
         conv.append_message(conv.roles[1], None)
         
@@ -269,48 +274,41 @@ class NaVILAImageInference:
             return_tensors='pt'
         ).unsqueeze(0).to(self.device)
         
-        if len(image_tensors.shape) == 3:
-            image_tensors = image_tensors.unsqueeze(0)
         image_tensors = image_tensors.to(self.device, dtype=torch.bfloat16)
         payload["rgb"] = image_tensors
-        with torch.inference_mode():
-            if self.use_flash_attn:
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                    output_ids = self.model.generate(
-                        input_ids,
-                        images=payload,
-                        do_sample=do_sample,
-                        temperature=temperature if do_sample else 1.0,
-                        top_p=top_p if do_sample else 1.0,
-                        max_new_tokens=max_new_tokens,
-                        use_cache=True,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
-            else:
-                output_ids = self.model.generate(
-                    input_ids,
-                    images=payload,
-                    do_sample=do_sample,
-                    temperature=temperature if do_sample else 1.0,
-                    top_p=top_p if do_sample else 1.0,
-                    max_new_tokens=max_new_tokens,
-                    use_cache=True,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
-        
-        # Decode text output
-        input_token_len = input_ids.shape[1]
-        outputs = self.tokenizer.batch_decode(
-            output_ids, 
-            skip_special_tokens=True
-        )[0]
-        outputs = outputs.strip()
+        return {"input_ids": input_ids, "images": payload}
 
-        if return_token_ids:
-            return outputs, output_ids[0]
-        return outputs
+    def sample_prepared(self, prepared, max_new_tokens=512, temperature=1.0,
+                        top_p=1.0, do_sample=True):
+        self.model.eval()
+        with torch.inference_mode():
+            result = self.model.generate(
+                prepared["input_ids"], images=prepared["images"],
+                do_sample=do_sample, temperature=temperature if do_sample else 1.0,
+                top_p=top_p if do_sample else 1.0, top_k=0,
+                max_new_tokens=max_new_tokens, use_cache=True,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                return_dict_in_generate=True, output_scores=True,
+            )
+        # inputs_embeds generation may include an artificial BOS prefix in some
+        # Transformers versions. Scores count only newly generated tokens.
+        count = len(result.scores)
+        if count == 0:
+            raise ValueError("Generation returned no completion tokens")
+        completion = result.sequences[0, -count:].detach().cpu()
+        text = self.tokenizer.decode(completion, skip_special_tokens=True).strip()
+        return text, completion
+
+    def generate_response(self, image_input, question, max_new_tokens=512,
+                          temperature=0.7, top_p=0.9, do_sample=True,
+                          depth_input=None, point_cloud=None, return_token_ids=False):
+        prepared = self.prepare_observation(image_input, question, depth_input, point_cloud)
+        text, completion = self.sample_prepared(
+            prepared, max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, do_sample=do_sample,
+        )
+        return (text, completion) if return_token_ids else text
 
 
 def main():
@@ -326,6 +324,8 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--depth_path", nargs="+", help="Depth maps aligned with the RGB observation")
+    parser.add_argument("--point_cloud", default=None, help="Point .npy path or from_depth")
     parser.add_argument("--no_flash_attn", action="store_true",
                        help="Disable Flash Attention")
     
@@ -343,7 +343,9 @@ def main():
             question=args.question,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
-            top_p=args.top_p
+            top_p=args.top_p,
+            depth_input=args.depth_path,
+            point_cloud=args.point_cloud
         )
         
         print(f"Question: {args.question}")

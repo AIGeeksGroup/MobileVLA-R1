@@ -16,6 +16,7 @@
 # This file is modified from https://github.com/haotian-liu/LLaVA/
 
 
+from mobilevla.checkpoints import auxiliary_buffers
 import json
 import os
 import random
@@ -756,6 +757,7 @@ class LLaVATrainer(Trainer):
 
         if self.args.lora_enable:
             non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(self.model.named_parameters())
+            non_lora_state_dict.update(auxiliary_buffers(self.model))
             os.makedirs(output_dir, exist_ok=True)
             torch.save(
                 non_lora_state_dict,

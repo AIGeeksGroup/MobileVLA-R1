@@ -1,6 +1,7 @@
 #!/bin/bash
+set -euo pipefail
 
-OUTPUT="./checkpoints/navila-8b-8f-sft-lora/sft_new1"  # Change output dir name to track runs
+OUTPUT="${OUTPUT_DIR:-./checkpoints/navila-8b-8f-sft-lora/sft_new1}"  # Change output dir name to track runs
 
 # export NNODES=1
 # export GPUS_PER_NODE=2
@@ -14,7 +15,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=29500 \
     llava/train/train_mem.py \
     --longvila_sampler True \
     --deepspeed ./scripts/zero3.json \
-    --model_name_or_path /root/autodl-tmp/model/finetune \
+    --model_name_or_path "${MODEL_PATH:?Set MODEL_PATH to the base full model}" \
     --version llama_3 \
     --seed 10 \
     --data_mixture cot+nav_cot_vln \
@@ -23,7 +24,6 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=29500 \
     --mm_projector mlp_downsample \
     --num_video_frames 8 \
     \
-    `# LoRA configuration` \
     --lora_enable True \
     --lora_r 16 \
     --lora_alpha 32 \
@@ -32,7 +32,6 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=29500 \
     --lora_vt False \
     --lora_bias none \
     \
-    `# Fine-tuning strategy for LoRA` \
     --tune_vision_tower False \
     --tune_mm_projector True \
     --tune_language_model True \
@@ -46,8 +45,8 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=29500 \
     \
     --navcot_use_depth True \
     --navcot_use_point True \
-    --navcot_image_root /root/autodl-tmp/dataset/NavCoT/frames \
-    --navcot_depth_root /root/autodl-tmp/dataset/NavCoT/depth \
+    --navcot_image_root "${NAVCOT_IMAGE_ROOT:?Set NAVCOT_IMAGE_ROOT}" \
+    --navcot_depth_root "${NAVCOT_DEPTH_ROOT:?Set NAVCOT_DEPTH_ROOT}" \
     --navcot_depth_format png \
     --navcot_depth_scale 1000 \
     --navcot_pointcloud_points 2048 \
@@ -58,7 +57,7 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=29500 \
     --mm_use_im_patch_token False \
     --image_aspect_ratio resize \
     --bf16 True \
-    --output_dir $OUTPUT \
+    --output_dir "$OUTPUT" \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 1 \
@@ -77,4 +76,5 @@ torchrun --nnodes=1 --nproc_per_node=1 --master_port=29500 \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
-    --report_to wandb
+    --report_to wandb \
+    "$@"

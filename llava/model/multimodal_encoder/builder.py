@@ -17,6 +17,7 @@
 # This file is modified from https://github.com/haotian-liu/LLaVA/
 
 import os
+from typing import Optional
 
 import torch.nn as nn
 
@@ -72,7 +73,7 @@ def build_vision_tower(model_name_or_path: str, config: PretrainedConfig) -> Pre
 def build_depth_tower(model_name_or_path: Optional[str], config: PretrainedConfig) -> Optional[nn.Module]:
     if not getattr(config, "use_depth_tower", False):
         return None
-    depth_hidden = getattr(config, "depth_hidden_size", config.mm_hidden_size)
+    depth_hidden = (getattr(config, "depth_hidden_size", None) or config.mm_hidden_size)
     if model_name_or_path is None or model_name_or_path.lower() in ("depth_anything_v2", "depth_encoder"):
         return DepthFeatureEncoder(hidden_size=depth_hidden)
     raise ValueError(f"Unknown depth tower: {model_name_or_path}")
@@ -81,7 +82,7 @@ def build_depth_tower(model_name_or_path: Optional[str], config: PretrainedConfi
 def build_point_tower(model_name_or_path: Optional[str], config: PretrainedConfig) -> Optional[nn.Module]:
     if not getattr(config, "use_point_tower", False):
         return None
-    point_hidden = getattr(config, "point_hidden_size", config.mm_hidden_size)
+    point_hidden = (getattr(config, "point_hidden_size", None) or config.mm_hidden_size)
     in_channels = 3
     if model_name_or_path is None or model_name_or_path.lower() in ("point_transformer", "point_encoder"):
         return PointTransformerEncoder(in_channels=in_channels, hidden_size=point_hidden)

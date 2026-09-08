@@ -1,31 +1,33 @@
-from peft import PeftModel
-import os
-import torch
-from transformers import AutoModelForCausalLM
-from llava.model import *
-from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
-from llava.conversation import conv_templates
-from llava.mm_utils import process_image, tokenizer_image_token
+"""Merge SFT adapters and export all modalities. Runs only when explicitly invoked."""
+import argparse
+from pathlib import Path
 
-# Load base model
-model = LlavaLlamaModel.from_pretrained("/root/autodl-tmp/model/finetune")
-print("Loaded base model")
 
-# Load non-LoRA weights
-lora_path = "./checkpoints/navila-8b-8f-sft-lora/sft_new1"
-non_lora_path = os.path.join(lora_path, "non_lora_trainables.bin")
-if os.path.exists(non_lora_path):
-    non_lora_weights = torch.load(non_lora_path, map_location="cpu")
-    model.load_state_dict(non_lora_weights, strict=False)
-    print("Loaded non-LoRA trainables")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--base-model', required=True)
+    parser.add_argument('--lora-path', required=True)
+    parser.add_argument('--output-dir', required=True)
+    args = parser.parse_args()
+    from peft import PeftModel
+    from llava.model import LlavaLlamaConfig, LlavaLlamaModel
+    from mobilevla.checkpoints import load_non_lora
 
-# Load LoRA adapters
-model = PeftModel.from_pretrained(model, "./checkpoints/navila-8b-8f-sft-lora/sft_new1")
-print("Loaded LoRA weights")
+    config = LlavaLlamaConfig.from_pretrained(args.lora_path)
+    # The adapter config may contain checkpoint-relative component paths. Load
+    # base component locations while retaining the adapter's modality settings.
+    base = LlavaLlamaConfig.from_pretrained(args.base_model)
+    for name in ('llm_cfg', 'vision_tower_cfg', 'mm_projector_cfg'):
+        setattr(config, name, getattr(base, name))
+    config.auxiliary_weights_file = getattr(base, 'auxiliary_weights_file', None)
+    model = LlavaLlamaModel.from_pretrained(args.base_model, config=config)
+    non_lora = Path(args.lora_path) / 'non_lora_trainables.bin'
+    if not non_lora.is_file():
+        raise FileNotFoundError(f'Missing SFT non-LoRA parameters: {non_lora}')
+    load_non_lora(model, non_lora)
+    model = PeftModel.from_pretrained(model, args.lora_path).merge_and_unload()
+    model.save_pretrained(args.output_dir)
 
-# Merge LoRA weights into the model
-model = model.merge_and_unload()
-print("Merged LoRA weights into the model")
 
-# Save the merged full model
-model.save_pretrained("/root/autodl-tmp/model/MobileVla-r1-8b")
+if __name__ == '__main__':
+    main()

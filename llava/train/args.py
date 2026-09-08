@@ -76,8 +76,8 @@ class DataArguments:
         metadata={"help": "How many depth maps to retain per Nav-CoT sample (default uses the latest frame)."},
     )
     navcot_append_metadata: bool = field(
-        default=True,
-        metadata={"help": "If True, inject pose/geodesic metadata into Nav-CoT questions."},
+        default=False,
+        metadata={"help": "Deprecated: policy prompts no longer include privileged simulator metadata."},
     )
 
 
@@ -104,11 +104,11 @@ class ModelArguments:
     soft_ce_std: float = 1.0
     use_depth_tower: bool = field(
         default=False,
-        metadata={"help": "Enable an auxiliary depth encoder (Depth Anything v2) for multi-modal fusion."},
+        metadata={"help": "Enable a CNN encoder over externally generated depth maps."},
     )
     use_point_tower: bool = field(
         default=False,
-        metadata={"help": "Enable an auxiliary point-cloud encoder (Point Transformer) for fusion."},
+        metadata={"help": "Enable the lightweight TransformerEncoder over point clouds."},
     )
     depth_tower: Optional[str] = field(
         default="depth_anything_v2",

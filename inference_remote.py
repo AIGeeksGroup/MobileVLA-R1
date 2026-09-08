@@ -8,6 +8,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from PIL import Image
 import uvicorn
+import numpy as np
+import torch
+from mobilevla.data import policy_question
+from mobilevla.actions import parse_answer
 import argparse
 
 # Import the inference class
@@ -26,6 +30,8 @@ class InferenceResponse(BaseModel):
     success: bool
     response: Optional[str] = None
     error: Optional[str] = None
+    action: Optional[str] = None
+    velocity: Optional[List[float]] = None
 
 
 app = FastAPI(title="NaVILA Remote Inference API", version="1.0.0")
@@ -60,6 +66,22 @@ async def health_check():
     return {"status": "healthy", "message": "Model is ready"}
 
 
+async def decode_depth_uploads(files, scale):
+    if not files:
+        return None
+    maps = []
+    for upload in files:
+        raw = await upload.read()
+        if (upload.filename or '').lower().endswith('.npy'):
+            values = np.load(io.BytesIO(raw), allow_pickle=False).astype(np.float32)
+        else:
+            values = np.asarray(Image.open(io.BytesIO(raw)), dtype=np.float32) / scale
+        if values.ndim != 2 or not np.isfinite(values).all():
+            raise ValueError('Depth uploads must be finite single-channel maps')
+        maps.append(torch.from_numpy(values).unsqueeze(0).unsqueeze(0))
+    return maps
+
+
 @app.post("/inference", response_model=InferenceResponse)
 async def run_inference(
     image: UploadFile = File(...),
@@ -67,7 +89,10 @@ async def run_inference(
     max_new_tokens: int = Form(512),
     temperature: float = Form(0.7),
     top_p: float = Form(0.9),
-    do_sample: bool = Form(True)
+    do_sample: bool = Form(True),
+    depth_maps: Optional[List[UploadFile]] = File(None),
+    task: str = Form("navigation"),
+    derive_points: bool = Form(True)
 ):
     """Run single-image inference."""
     if inferencer is None:
@@ -85,14 +110,18 @@ async def run_inference(
         
         response = inferencer.generate_response(
             image_input=image_tensor,
-            question=instruction,
+            question=policy_question(instruction, task),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            do_sample=do_sample
+            do_sample=do_sample,
+            depth_input=await decode_depth_uploads(depth_maps, inferencer.depth_scale),
+            point_cloud="from_depth" if derive_points and depth_maps else None
         )
         
-        return InferenceResponse(success=True, response=response)
+        parsed = parse_answer(response)
+        return InferenceResponse(success=True, response=response, action=parsed.action,
+                                 velocity=list(parsed.velocity) if parsed.velocity is not None else None)
         
     except Exception as e:
         error_msg = f"Inference failed: {str(e)}"
@@ -108,7 +137,10 @@ async def run_inference_batch(
     max_new_tokens: int = Form(512),
     temperature: float = Form(0.7),
     top_p: float = Form(0.9),
-    do_sample: bool = Form(True)
+    do_sample: bool = Form(True),
+    depth_maps: Optional[List[UploadFile]] = File(None),
+    task: str = Form("navigation"),
+    derive_points: bool = Form(True)
 ):
     """Run inference for multiple images."""
     if inferencer is None:
@@ -130,14 +162,18 @@ async def run_inference_batch(
         
         response = inferencer.generate_response(
             image_input=combined_tensor,
-            question=instruction,
+            question=policy_question(instruction, task),
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
-            do_sample=do_sample
+            do_sample=do_sample,
+            depth_input=await decode_depth_uploads(depth_maps, inferencer.depth_scale),
+            point_cloud="from_depth" if derive_points and depth_maps else None
         )
         
-        return InferenceResponse(success=True, response=response)
+        parsed = parse_answer(response)
+        return InferenceResponse(success=True, response=response, action=parsed.action,
+                                 velocity=list(parsed.velocity) if parsed.velocity is not None else None)
         
     except Exception as e:
         error_msg = f"Batch inference failed: {str(e)}"

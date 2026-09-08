@@ -58,6 +58,7 @@ from llava.train.sequence_parallel import (
 )
 from llava.utils.logging import logger
 from llava.utils.tokenizer import preprocess_conversation
+from mobilevla.data import load_records, observation_question, policy_question, resolve_depth_path, sft_target
 from llava.data.nav_cot_utils import depth_to_point_cloud, load_depth_map, normalize_nav_path
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -205,153 +206,6 @@ class DummyDataset(Dataset):
             cur_len = cur_len if "image" in sample else -cur_len
             length_list.append(cur_len)
         return length_list
-
-    def _format_token_block(self, label: str, count: int) -> str:
-        if count <= 0:
-            return ""
-        tokens = "\n".join([DEFAULT_IMAGE_TOKEN for _ in range(count)])
-        return f"{label}:\n{tokens}\n"
-
-    def _resolve_nav_path(self, raw_path: str, override_root: Optional[str]) -> str:
-        return normalize_nav_path(raw_path, override_root)
-
-    def _compose_navcot_question(self, sample: Dict[str, Any], num_rgb: int, num_depth: int, num_point: int) -> str:
-        chunks = [
-            self._format_token_block("RGB observations", num_rgb),
-        ]
-        if num_depth > 0:
-            chunks.append(self._format_token_block("Depth Anything v2 maps", num_depth))
-        if num_point > 0:
-            chunks.append(self._format_token_block("Point Transformer tokens", num_point))
-
-        if self.data_args.navcot_append_metadata:
-            scene_id = sample.get("scene_id", "unknown")
-            timestep = sample.get("timestep", -1)
-            geo = sample.get("geodesic_distance", None)
-            heading = sample.get("current_heading_rad", None)
-            chunks.append(f"Scene {scene_id} | timestep {timestep}.")
-            if heading is not None:
-                chunks.append(f"Heading (rad): {heading:.3f}.")
-            if geo is not None:
-                chunks.append(f"Geodesic distance: {geo:.2f}m.")
-
-        instruction = sample.get("instruction", "").strip()
-        nav_context = (
-            "You are a quadruped robot navigating a Matterport3D house. "
-            "Fuse the provided RGB, Depth-Anything v2, and point cloud cues to reason about the next action."
-        )
-        chunks.extend([nav_context, f"Instruction: \"{instruction}\""])
-        return "\n".join(chunk for chunk in chunks if chunk)
-
-    def _compose_navcot_answer(self, sample: Dict[str, Any]) -> str:
-        reasoning = sample.get("think") or sample.get("response_raw") or ""
-        action = sample.get("action") or sample.get("action_label") or ""
-        return f"<think>{reasoning.strip()}</think>\n<action>{action.strip()}</action>"
-
-    def _load_navcot_rgb(self, image_paths: Sequence[str]) -> Tuple[List[Image.Image], List[str]]:
-        pil_images = []
-        resolved_paths = []
-        for raw_path in image_paths:
-            resolved = self._resolve_nav_path(raw_path, self.data_args.navcot_image_root)
-            resolved_paths.append(resolved)
-            if os.path.exists(resolved):
-                pil_images.append(Image.open(resolved).convert("RGB"))
-        if not pil_images:
-            pil_images = [Image.new("RGB", (448, 448), (0, 0, 0))]
-        return pil_images, resolved_paths
-
-    def _load_navcot_depth(self, frame_paths: Sequence[str]) -> Optional[torch.Tensor]:
-        if not self.data_args.navcot_use_depth or not self.data_args.navcot_depth_root:
-            return None
-        tensors = []
-        for frame_path in frame_paths[-self.data_args.navcot_depth_frames :]:
-            depth_path = self._resolve_nav_path(frame_path, self.data_args.navcot_depth_root)
-            depth_path = str(Path(depth_path).with_suffix(f".{self.data_args.navcot_depth_format}"))
-            if not os.path.exists(depth_path):
-                logger.warning(f"[NavCoT] depth map missing: {depth_path}")
-                continue
-            tensors.append(load_depth_map(depth_path, scale=self.data_args.navcot_depth_scale))
-        if not tensors:
-            return None
-        return torch.cat(tensors, dim=0)
-
-    def _build_video_sample(self, sample: Dict[str, Any]):
-        num_video_frames = self.data_args.num_video_frames
-        frames = sample["frames"]
-        video_folder = self.image_folder
-        video_paths = [os.path.join(video_folder, frame) for frame in frames]
-
-        images, video_loading_succeed = self._load_video(video_paths, num_video_frames, self.data_args)
-        image_tensor = torch.stack([process_image(image, self.data_args, None) for image in images])
-
-        instruction = sample["q"].replace("\r\n", " ").replace("\n", " ")
-        instruction = re.sub(r"(?<=\.\s)([a-z])", lambda x: x.group().upper(), instruction.capitalize())
-        instruction = re.sub(r"\s+\.", ".", instruction)
-        answer = sample["a"]
-
-        image_tokens = "<image>\n" * (image_tensor.shape[0] - 1)
-        question = (
-            f"Imagine you are a robot programmed for navigation tasks. You have been given a video "
-            f'of historical observations {image_tokens}, and current observation <image>\n. Your assigned task is: "{instruction}" '
-            f"Analyze this series of images to decide your next action, which could be turning left or right by a specific "
-            f"degree, moving forward a certain distance, or stop if the task is completed."
-        )
-
-        if not video_loading_succeed:
-            answer = "Empty video."
-
-        payload = {"rgb": image_tensor}
-        token_types = ["rgb"] * image_tensor.shape[0]
-        return payload, question, answer, token_types, video_loading_succeed
-
-    def _build_navcot_sample(self, sample: Dict[str, Any]):
-        raw_images = sample.get("images", [])
-        pil_images, resolved = self._load_navcot_rgb(raw_images)
-        num_frames = self.data_args.num_video_frames
-        if len(pil_images) < num_frames:
-            while len(pil_images) < num_frames:
-                pil_images.append(pil_images[-1])
-        sampled_indices = np.linspace(0, len(pil_images) - 1, num=num_frames, dtype=int)
-        sampled_images = [pil_images[idx] for idx in sampled_indices]
-        rgb_tensor = torch.stack([process_image(img, self.data_args, None) for img in sampled_images])
-
-        depth_tensor = self._load_navcot_depth(resolved) if self.data_args.navcot_use_depth else None
-        point_tensor = None
-        if self.data_args.navcot_use_point and depth_tensor is not None:
-            pcs = []
-            for depth_map in depth_tensor:
-                pc = depth_to_point_cloud(
-                    depth_map.unsqueeze(0),
-                    max_points=self.data_args.navcot_pointcloud_points,
-                    normalize=self.data_args.navcot_point_normalize,
-                )
-                pcs.append(pc)
-            if pcs:
-                point_tensor = torch.stack(pcs)
-
-        token_types = ["rgb"] * rgb_tensor.shape[0]
-        if depth_tensor is not None:
-            token_types += ["depth"] * depth_tensor.shape[0]
-        if point_tensor is not None:
-            token_types += ["point"] * point_tensor.shape[0]
-
-        question = self._compose_navcot_question(
-            sample,
-            num_rgb=rgb_tensor.shape[0],
-            num_depth=depth_tensor.shape[0] if depth_tensor is not None else 0,
-            num_point=point_tensor.shape[0] if point_tensor is not None else 0,
-        )
-        answer = self._compose_navcot_answer(sample)
-        payload = {"rgb": rgb_tensor, "depth": depth_tensor, "point": point_tensor}
-        return payload, question, answer, token_types
-
-    def _build_sample(self, sample: Dict[str, Any]):
-        if "frames" in sample and "video_id" in sample:
-            return self._build_video_sample(sample)
-        if "images" in sample and "instruction" in sample:
-            payload, question, answer, token_types = self._build_navcot_sample(sample)
-            return payload, question, answer, token_types, True
-        raise ValueError(f"Unknown data type: {sample.keys()}")
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
@@ -2314,12 +2168,13 @@ class LazyVLNCEDataset(Dataset):
         training_args: TrainingArguments,
     ):
         super().__init__()
-        try:
-            with open(data_path) as fp:
-                list_data_dict = json.load(fp)
-        except:
-            with open(data_path) as fp:
-                list_data_dict = [json.loads(q) for q in fp]
+        list_data_dict = load_records(data_path)
+        if training_args.seq_parallel_size > 1:
+            raise ValueError("VLN multimodal payloads currently require --seq_parallel_size 1")
+        if data_args.navcot_use_depth and not data_args.navcot_depth_root:
+            raise ValueError("--navcot_use_depth requires --navcot_depth_root")
+        if data_args.navcot_use_point and not data_args.navcot_use_depth:
+            raise ValueError("Derived point clouds require --navcot_use_depth")
 
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
@@ -2331,35 +2186,138 @@ class LazyVLNCEDataset(Dataset):
 
     @property
     def lengths(self):
-        length_list = []
-        for sample in self.list_data_dict:
-            img_tokens = 128 if "image" in sample else 0
-            length_list.append(sum(len(conv["value"].split()) for conv in sample["conversations"]) + img_tokens)
-        return length_list
+        return [len(str(sample.get("instruction", sample.get("q", ""))).split())
+                + len(str(sample.get("a", sample.get("think", ""))).split())
+                + 128 * self.data_args.num_video_frames for sample in self.list_data_dict]
 
     @property
     def modality_lengths(self):
-        length_list = []
-        for sample in self.list_data_dict:
-            cur_len = sum(len(conv["value"].split()) for conv in sample["conversations"])
-            cur_len = cur_len if "image" in sample else -cur_len
-            length_list.append(cur_len)
-        return length_list
+        return self.lengths
 
     @staticmethod
     def _load_video(video_paths, num_video_frames, data_args):
         from llava.mm_utils import vlnce_frame_sampling
 
-        video_loading_succeed = True
-        try:
-            pil_imgs = vlnce_frame_sampling(video_paths, num_video_frames)
+        for path in video_paths:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Missing RGB frame: {path}")
+        pil_imgs = vlnce_frame_sampling(video_paths, num_video_frames)
+        return pil_imgs, True
 
-        except Exception as e:
-            video_loading_succeed = False
-            print(f"[Error] bad data paths {video_paths}: {e}")
-            pil_imgs = [Image.new("RGB", (448, 448), (0, 0, 0))] * num_video_frames
+    def _format_token_block(self, label: str, count: int) -> str:
+        if count <= 0:
+            return ""
+        tokens = "\n".join([DEFAULT_IMAGE_TOKEN for _ in range(count)])
+        return f"{label}:\n{tokens}\n"
 
-        return pil_imgs, video_loading_succeed
+    def _resolve_nav_path(self, raw_path: str, override_root: Optional[str]) -> str:
+        return normalize_nav_path(raw_path, override_root)
+
+    def _compose_navcot_question(self, sample: Dict[str, Any], num_rgb: int, num_depth: int, num_point: int) -> str:
+        _, task = sft_target(sample)
+        question = policy_question(sample.get("instruction", sample.get("q", "")), task)
+        # Privileged simulator distances are never included in policy inputs.
+        tokens = ["rgb"] * num_rgb + ["depth"] * num_depth + ["point"] * num_point
+        return observation_question(question, tokens)
+
+    def _compose_navcot_answer(self, sample: Dict[str, Any]) -> str:
+        return sft_target(sample)[0]
+
+    def _load_navcot_rgb(self, image_paths: Sequence[str]) -> Tuple[List[Image.Image], List[str]]:
+        pil_images = []
+        resolved_paths = []
+        for raw_path in image_paths:
+            resolved = self._resolve_nav_path(raw_path, self.data_args.navcot_image_root)
+            resolved_paths.append(resolved)
+            if not os.path.exists(resolved):
+                raise FileNotFoundError(f"Missing RGB frame: {resolved}")
+            pil_images.append(Image.open(resolved).convert("RGB"))
+        if not pil_images:
+            raise ValueError("Navigation sample has no RGB frames")
+        return pil_images, resolved_paths
+
+    def _load_navcot_depth(self, frame_paths: Sequence[str]) -> Optional[torch.Tensor]:
+        if not self.data_args.navcot_use_depth or not self.data_args.navcot_depth_root:
+            return None
+        tensors = []
+        for frame_path in frame_paths[-self.data_args.navcot_depth_frames :]:
+            depth_path = resolve_depth_path(frame_path, self.data_args.navcot_image_root,
+                                            self.data_args.navcot_depth_root, self.data_args.navcot_depth_format)
+            if not os.path.exists(depth_path):
+                raise FileNotFoundError(f"Missing depth map: {depth_path}")
+            tensors.append(load_depth_map(depth_path, scale=self.data_args.navcot_depth_scale))
+        if not tensors:
+            return None
+        return torch.cat(tensors, dim=0)
+
+    def _build_video_sample(self, sample: Dict[str, Any]):
+        num_video_frames = self.data_args.num_video_frames
+        frames = sample["frames"]
+        video_folder = self.image_folder
+        video_paths = [os.path.join(video_folder, frame) for frame in frames]
+
+        images, video_loading_succeed = self._load_video(video_paths, num_video_frames, self.data_args)
+        image_tensor = torch.stack([process_image(image, self.data_args, None) for image in images])
+
+        answer, task = sft_target(sample)
+        question = observation_question(policy_question(sample["q"], task), ["rgb"] * image_tensor.shape[0])
+
+        payload = {"rgb": image_tensor}
+        token_types = ["rgb"] * image_tensor.shape[0]
+        return payload, question, answer, token_types, video_loading_succeed
+
+    def _build_navcot_sample(self, sample: Dict[str, Any]):
+        raw_images = sample.get("images", [])
+        pil_images, resolved = self._load_navcot_rgb(raw_images)
+        num_frames = self.data_args.num_video_frames
+        if len(pil_images) < num_frames:
+            while len(pil_images) < num_frames:
+                pil_images.append(pil_images[-1])
+        sampled_indices = np.linspace(0, len(pil_images) - 1, num=num_frames, dtype=int)
+        sampled_images = [pil_images[idx] for idx in sampled_indices]
+        rgb_tensor = torch.stack([process_image(img, self.data_args, None) for img in sampled_images])
+
+        depth_tensor = self._load_navcot_depth(raw_images) if self.data_args.navcot_use_depth else None
+        point_tensor = None
+        if self.data_args.navcot_use_point and depth_tensor is not None:
+            pcs = []
+            for depth_map in depth_tensor:
+                pc = depth_to_point_cloud(
+                    depth_map.unsqueeze(0),
+                    max_points=self.data_args.navcot_pointcloud_points,
+                    normalize=self.data_args.navcot_point_normalize,
+                )
+                pcs.append(pc)
+            if pcs:
+                point_tensor = torch.stack(pcs)
+
+        token_types = ["rgb"] * rgb_tensor.shape[0]
+        if depth_tensor is not None:
+            token_types += ["depth"] * depth_tensor.shape[0]
+        if point_tensor is not None:
+            token_types += ["point"] * point_tensor.shape[0]
+
+        question = self._compose_navcot_question(
+            sample,
+            num_rgb=rgb_tensor.shape[0],
+            num_depth=depth_tensor.shape[0] if depth_tensor is not None else 0,
+            num_point=point_tensor.shape[0] if point_tensor is not None else 0,
+        )
+        answer = self._compose_navcot_answer(sample)
+        payload = {"rgb": rgb_tensor, "depth": depth_tensor, "point": point_tensor}
+        return payload, question, answer, token_types
+
+    def _build_sample(self, sample: Dict[str, Any]):
+        if "frames" in sample and "video_id" in sample:
+            if self.data_args.navcot_use_depth:
+                normalized = dict(sample, images=sample["frames"], instruction=sample["q"])
+                payload, question, answer, tokens = self._build_navcot_sample(normalized)
+                return payload, question, answer, tokens, True
+            return self._build_video_sample(sample)
+        if "images" in sample and "instruction" in sample:
+            payload, question, answer, token_types = self._build_navcot_sample(sample)
+            return payload, question, answer, token_types, True
+        raise ValueError(f"Unknown data type: {sample.keys()}")
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sample = self.list_data_dict[i]

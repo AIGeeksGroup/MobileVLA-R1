@@ -14,6 +14,7 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+from mobilevla.checkpoints import auxiliary_buffers, load_non_lora
 import copy
 import logging
 import os
@@ -118,7 +119,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model, lora_llm, lora_vt):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ["mm_projector", "vision_resampler"]
+    multimodal_keywords = ["mm_projector", "vision_resampler", "depth_tower", "point_tower", "depth_bridge", "point_bridge"]
     assert lora_llm or lora_vt, "Not applying LoRA to any of the modules..."
 
     if not lora_llm:
@@ -567,18 +568,7 @@ def train():
         if resume_from_checkpoint:
             # load non-lora weights
             if os.path.exists(os.path.join(resume_path, "non_lora_trainables.bin")):
-                non_lora_trainables = torch.load(
-                    os.path.join(resume_path, "non_lora_trainables.bin"),
-                    map_location="cpu",
-                )
-                non_lora_trainables = {
-                    (k[11:] if k.startswith("base_model.") else k): v for k, v in non_lora_trainables.items()
-                }
-                if any(k.startswith("model.model.") for k in non_lora_trainables):
-                    non_lora_trainables = {
-                        (k[6:] if k.startswith("model.") else k): v for k, v in non_lora_trainables.items()
-                    }
-                model.load_state_dict(non_lora_trainables, strict=False)
+                load_non_lora(model, os.path.join(resume_path, "non_lora_trainables.bin"))
 
             mprint("Resume from checkpoint...", resume_path)
             model = PeftModel.from_pretrained(model, resume_path, is_trainable=True)
@@ -587,6 +577,15 @@ def train():
             model = get_peft_model(model, lora_config)
         mprint(model)
         model.print_trainable_parameters()
+
+    # New modality encoders are trained in full, rather than attaching LoRA to
+    # freshly initialized layers and leaving their backbone random/frozen.
+    for name in ("depth_tower", "point_tower", "depth_bridge", "point_bridge"):
+        module = getattr(model, name, None)
+        if module is not None:
+            module.requires_grad_(True)
+    model.config.tune_depth_tower = True
+    model.config.tune_point_tower = True
 
     # currently assume fft for mm projector
     if training_args.lora_enable:
@@ -770,6 +769,7 @@ def train():
     if training_args.lora_enable:
         state_dict = get_peft_state_maybe_zero_3(model.named_parameters(), training_args.lora_bias)
         non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(model.named_parameters())
+        non_lora_state_dict.update(auxiliary_buffers(model))
         if training_args.local_rank == 0 or training_args.local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)

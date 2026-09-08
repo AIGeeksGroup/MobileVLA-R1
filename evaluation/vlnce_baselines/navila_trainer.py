@@ -33,6 +33,9 @@ from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from llava.conversation import SeparatorStyle, conv_templates
 from llava.mm_utils import KeywordsStoppingCriteria, get_model_name_from_path, process_images, tokenizer_image_token
 from llava.model.builder import load_pretrained_model
+from llava.data.nav_cot_utils import depth_to_point_cloud
+from mobilevla.actions import habitat_action, parse_answer, serialize_answer
+from mobilevla.data import observation_question, policy_question
 
 
 def sample_and_pad_images(images, num_frames=8, width=512, height=512):
@@ -50,6 +53,35 @@ def sample_and_pad_images(images, num_frames=8, width=512, height=512):
     sampled_frames = [frames[i] for i in sampled_indices] + [latest_frame]
 
     return sampled_frames
+
+
+def mobilevla_payload(model, rgb_tensor, rgb, observation, config, depth_provider=None):
+    payload = {"rgb": rgb_tensor, "token_types": ["rgb"] * rgb_tensor.shape[0]}
+    needs_depth = getattr(model, "depth_tower", None) is not None
+    needs_point = getattr(model, "point_tower", None) is not None
+    if needs_depth or needs_point:
+        source = config.MOBILEVLA.DEPTH_SOURCE
+        if source == "simulator":
+            if "depth" not in observation:
+                raise ValueError("Simulator observation does not contain depth")
+            depth = torch.as_tensor(observation["depth"]).float().squeeze(-1)
+            sensor = config.TASK_CONFIG.SIMULATOR.DEPTH_SENSOR
+            if sensor.NORMALIZE_DEPTH:
+                depth = depth * (sensor.MAX_DEPTH - sensor.MIN_DEPTH) + sensor.MIN_DEPTH
+        elif source == "provider" and depth_provider is not None:
+            depth = torch.as_tensor(depth_provider(np.asarray(rgb))).float()
+        else:
+            raise ValueError("Depth/point policy requires an explicit simulator or RGB depth provider")
+        if depth.ndim != 2 or not torch.isfinite(depth).all():
+            raise ValueError("Depth provider must return a finite H x W map")
+        depth = depth.unsqueeze(0).unsqueeze(0)
+        if needs_depth:
+            payload["depth"] = depth
+            payload["token_types"].append("depth")
+        if needs_point:
+            payload["point"] = depth_to_point_cloud(depth, config.MOBILEVLA.POINT_COUNT).unsqueeze(0)
+            payload["token_types"].append("point")
+    return payload
 
 
 @baseline_registry.register_trainer(name="navila")
@@ -83,7 +115,14 @@ class NaVILATrainer(BaseVLNCETrainer):
         # build model
         model_name = os.path.basename(os.path.normpath(checkpoint_path))
         tokenizer, model, image_processor, context_len = load_pretrained_model(checkpoint_path, model_name)
-        model = model.cuda()
+        model = model.cuda().eval()
+        depth_provider = None
+        if self.config.MOBILEVLA.ENABLED and self.config.MOBILEVLA.DEPTH_SOURCE == "provider":
+            import importlib
+            module, separator, name = self.config.MOBILEVLA.DEPTH_PROVIDER.partition(":")
+            if not separator:
+                raise ValueError("Set MOBILEVLA.DEPTH_PROVIDER to module:function")
+            depth_provider = getattr(importlib.import_module(module), name)
 
         config = self.config.clone()
         split = config.EVAL.SPLIT
@@ -179,15 +218,24 @@ class NaVILATrainer(BaseVLNCETrainer):
                         f"degree, moving forward a certain distance, or stop if the task is completed."
                     )
 
+                    images_tensor = process_images(past_and_current_rgbs, image_processor, model.config).to(
+                        model.device, dtype=model.dtype
+                    )
+                    image_payload = images_tensor
+                    if config.MOBILEVLA.ENABLED:
+                        image_payload = mobilevla_payload(
+                            model, images_tensor, curr_rgb, observations[0], config, depth_provider
+                        )
+                        question = observation_question(
+                            policy_question(instruction, "navigation"), image_payload["token_types"]
+                        )
+
                     conv_mode = "llama_3"
                     conv = conv_templates[conv_mode].copy()
                     conv.append_message(conv.roles[0], question)
                     conv.append_message(conv.roles[1], None)
                     prompt = conv.get_prompt()
 
-                    images_tensor = process_images(past_and_current_rgbs, image_processor, model.config).to(
-                        model.device, dtype=torch.float16
-                    )
                     input_ids = (
                         tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
                         .unsqueeze(0)
@@ -201,10 +249,10 @@ class NaVILATrainer(BaseVLNCETrainer):
                     with torch.inference_mode():
                         output_ids = model.generate(
                             input_ids,
-                            images=images_tensor.half().cuda(),
+                            images=image_payload,
                             do_sample=False,
                             temperature=0.0,
-                            max_new_tokens=32,
+                            max_new_tokens=config.MOBILEVLA.MAX_NEW_TOKENS if config.MOBILEVLA.ENABLED else 32,
                             use_cache=True,
                             stopping_criteria=[stopping_criteria],
                             pad_token_id=tokenizer.eos_token_id,
@@ -218,26 +266,25 @@ class NaVILATrainer(BaseVLNCETrainer):
                     outputs = outputs.strip()
                     print(outputs)
 
-                    # Define the regex patterns for each action
-                    patterns = {
-                        0: re.compile(r"\bstop\b", re.IGNORECASE),
-                        1: re.compile(r"\bis move forward\b", re.IGNORECASE),
-                        2: re.compile(r"\bis turn left\b", re.IGNORECASE),
-                        3: re.compile(r"\bis turn right\b", re.IGNORECASE),
-                    }
-
-                    # Function to map a string to an action integer
-                    def map_string_to_action(s):
-                        for action, pattern in patterns.items():
-                            if pattern.search(s):
-                                return action
-                        return None  # Return None if no match is found
-
-                    try:
-                        actions = [map_string_to_action(outputs)]
-                    except:
-                        actions = [1]
-                    print(actions)
+                    if config.MOBILEVLA.ENABLED:
+                        try:
+                            action_id, _ = habitat_action(outputs)
+                            # Downstream distance/angle handling sees only the final
+                            # answer; reasoning keywords cannot trigger a command.
+                            outputs = serialize_answer(parse_answer(outputs))
+                            actions = [action_id]
+                        except ValueError as exc:
+                            logger.warning(f"Invalid MobileVLA navigation answer; stopping episode: {exc}")
+                            actions = [0]
+                            outputs = "stop"
+                    else:
+                        patterns = {
+                            0: re.compile(r"\bstop\b", re.IGNORECASE),
+                            1: re.compile(r"\bis move forward\b", re.IGNORECASE),
+                            2: re.compile(r"\bis turn left\b", re.IGNORECASE),
+                            3: re.compile(r"\bis turn right\b", re.IGNORECASE),
+                        }
+                        actions = [next((action for action, pattern in patterns.items() if pattern.search(outputs)), 0)]
 
                 if actions[0] == 1:
                     try:
@@ -247,6 +294,9 @@ class NaVILATrainer(BaseVLNCETrainer):
                         distance = 25
                     if (distance % 25) != 0:
                         distance = min([25, 50, 75], key=lambda x: abs(x - distance))
+                    if config.MOBILEVLA.ENABLED:
+                        _, repeats = habitat_action(outputs)
+                        distance = repeats * 25
                     outputs = envs.step([1])
 
                     for _ in range(int(distance // 25) - 1):
@@ -260,6 +310,9 @@ class NaVILATrainer(BaseVLNCETrainer):
                         degree = 15
                     if (degree % 15) != 0:
                         degree = min([15, 30, 45], key=lambda x: abs(x - degree))
+                    if config.MOBILEVLA.ENABLED:
+                        _, repeats = habitat_action(outputs)
+                        degree = repeats * 15
                     outputs = envs.step([2])
 
                     for _ in range(int(degree // 15) - 1):
@@ -274,6 +327,9 @@ class NaVILATrainer(BaseVLNCETrainer):
                         degree = 15
                     if (degree % 15) != 0:
                         degree = min([15, 30, 45], key=lambda x: abs(x - degree))
+                    if config.MOBILEVLA.ENABLED:
+                        _, repeats = habitat_action(outputs)
+                        degree = repeats * 15
                     outputs = envs.step([3])
 
                     for _ in range(int(degree // 15) - 1):

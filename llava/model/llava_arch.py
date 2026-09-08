@@ -24,8 +24,8 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from transformers import AutoConfig, GenerationConfig, PreTrainedModel
-from transformers.modeling_utils import ContextManagers, no_init_weights
 
+from mobilevla.checkpoints import AUX_MODULES
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 from llava.mm_utils import process_images
 from llava.model.configuration_llava import LlavaConfig
@@ -73,7 +73,9 @@ class LlavaMetaModel(ABC):
         self.point_tower = build_point_tower(getattr(config, "point_tower_cfg", None), config)
         self.depth_bridge = None
         self.point_bridge = None
-        mm_hidden = getattr(config, "mm_hidden_size", None)
+        mm_hidden = config.mm_hidden_size
+        config.depth_hidden_size = getattr(config, "depth_hidden_size", None) or mm_hidden
+        config.point_hidden_size = getattr(config, "point_hidden_size", None) or mm_hidden
         if self.depth_tower is not None and getattr(config, "depth_hidden_size", mm_hidden) != mm_hidden:
             self.depth_bridge = nn.Linear(config.depth_hidden_size, mm_hidden)
         if self.point_tower is not None and getattr(config, "point_hidden_size", mm_hidden) != mm_hidden:
@@ -88,6 +90,20 @@ class LlavaMetaModel(ABC):
             if self.point_bridge is not None:
                 self.point_bridge = self.point_bridge.to(model_dtype)
 
+        root = osp.dirname(llm_cfg)
+        aux_file = getattr(config, "auxiliary_weights_file", None)
+        if aux_file:
+            if not root:
+                raise ValueError("Auxiliary weights require a checkpoint root")
+            aux_path = os.path.join(root, aux_file)
+            state = torch.load(aux_path, map_location="cpu", weights_only=True)
+            expected = {k for k in self.state_dict() if k.split('.')[0] in AUX_MODULES}
+            if set(state) != expected:
+                raise ValueError("Auxiliary checkpoint does not match the configured encoders")
+            self.load_state_dict(state, strict=False)
+        elif any(getattr(self, name, None) is not None for name in AUX_MODULES):
+            warnings.warn("No auxiliary checkpoint supplied; depth/point modules are newly initialized.")
+
         self.post_config()
         self.is_loaded = True
 
@@ -99,60 +115,28 @@ class LlavaMetaModel(ABC):
     def load_from_config(cls, model_path_or_config, *args, **kwargs):
         pass
 
-    ## FIXME we will use this function to load model in the future
     @classmethod
     def load_pretrained(cls, model_path_or_config, *args, **kwargs):
-        kwargs.pop("config", None)
-
-        if isinstance(model_path_or_config, str):
-            config = AutoConfig.from_pretrained(model_path_or_config)
+        config = kwargs.pop("config", None)
+        if isinstance(model_path_or_config, (str, os.PathLike)):
+            root = str(model_path_or_config)
+            if not os.path.isdir(root):
+                from huggingface_hub import snapshot_download
+                root = snapshot_download(root)
+            if config is None:
+                config = AutoConfig.from_pretrained(root)
+            config._name_or_path = root
         elif isinstance(model_path_or_config, LlavaConfig):
             config = model_path_or_config
+            root = getattr(config, "_name_or_path", None) or getattr(config, "resume_path", None)
         else:
-            raise NotImplementedError(
-                f"wrong type, {type(model_path_or_config)} \
-                                      {isinstance(model_path_or_config, LlavaConfig)}"
-            )
-
-        model_dtype = getattr(config, "model_dtype", "torch.float16")
-        if not hasattr(config, "model_dtype"):
-            warnings.warn("model_dtype not found in config, defaulting to torch.float16.")
-            config.model_dtype = model_dtype
-
-        cfgs = get_model_config(config)
-        if len(cfgs) == 3:
-            llm_cfg, vision_tower_cfg, mm_projector_cfg = cfgs
-        else:
-            raise ValueError("`llm_cfg` `mm_projector_cfg` `vision_tower_cfg` not found in the config.")
-
-        # print(llm_cfg, vision_tower_cfg, mm_projector_cfg); input("DEBUG load_pretrained")
-        init_context = [
-            no_init_weights(_enable=True),
-        ]
-        # print("Before Init Context")
-        # if hasattr(config, "deepspeed") and "mics" in config.deepspeed:
-        #     print("Using MiCS_Init")
-        #     import deepspeed
-        #     init_context.append(deepspeed.zero.MiCS_Init(config_dict_or_path=config.deepspeed))
-        with ContextManagers(init_context):
-            vlm = cls(config, *args, **kwargs)
-        # print(llm_cfg, vision_tower_cfg, mm_projector_cfg); input("DEBUG load_pretrained finish")
-
-        if hasattr(vlm, "llm") or hasattr(vlm, "vision_tower") or hasattr(vlm, "mm_projector"):
-            if vlm.is_loaded:
-                return vlm
-
-        vlm.llm, vlm.tokenizer = build_llm_and_tokenizer(llm_cfg, config, *args, **kwargs)
-        vlm.vision_tower = build_vision_tower(vision_tower_cfg, config)
-        vlm.mm_projector = build_mm_projector(mm_projector_cfg, config)
-
-        self.post_config()
-        self.is_loaded = True
-
-        # FIXME(ligeng, yunhao): llm should never be none here.
-        assert (
-            vlm.llm is not None or vlm.vision_tower is not None or vlm.mm_projector is not None
-        ), "At least one of the components must be instantiated."
+            raise TypeError("Expected a checkpoint directory, repository ID or LlavaConfig")
+        # Component builders initialize/load their own parameters. Do not suppress
+        # initialization of newly added modality encoders.
+        dtype = kwargs.pop("torch_dtype", None)
+        if dtype is not None:
+            config.model_dtype = str(dtype)
+        vlm = cls(config, *args, **kwargs)
         return vlm
 
     ## FIXME we will use this function to save the model in the future
@@ -199,6 +183,13 @@ class LlavaMetaModel(ABC):
                 state_dict=mm_projector_state_dict,
             )
             self.config.mm_projector_cfg = self.mm_projector.config
+        aux_state = {k: v.detach().cpu() for k, v in state_dict.items() if k.split('.')[0] in AUX_MODULES}
+        expected_aux = {k for k in self.state_dict() if k.split('.')[0] in AUX_MODULES}
+        if set(aux_state) != expected_aux:
+            raise ValueError("Refusing to export incomplete depth/point weights")
+        if aux_state:
+            self.config.auxiliary_weights_file = "auxiliary_model.bin"
+            torch.save(aux_state, os.path.join(output_dir, self.config.auxiliary_weights_file))
         ## update and save top-level config
         self.config._name_or_path = output_dir
         self.config.architectures = [self.__class__.__name__]
@@ -302,7 +293,7 @@ class LlavaMetaModel(ABC):
             assembled.append(buffers[token][idx])
             counters[token] += 1
 
-        return torch.stack(assembled, dim=0)
+        return assembled  # Modalities can have different numbers of tokens.
 
     ## @yunhao: is there a better way to handle function call and attributes for llm?
     ## support beam search
@@ -373,9 +364,13 @@ class LlavaMetaForCausalLM(ABC):
         # handle different image dtypes for packing
         if type(images) is list:
             images = torch.cat(images, dim=0)
-        elif images.ndim == 5:  # batch_size x seq_len x image_channels
+        elif not isinstance(images, dict) and images.ndim == 5:  # batch_size x seq_len x image_channels
             images = images.flatten(0, 1)
-        image_features = self.encode_images(images).to(self.device)
+        image_features = self.encode_images(images)
+        if isinstance(image_features, list):
+            image_features = [features.to(self.device) for features in image_features]
+        else:
+            image_features = image_features.to(self.device)
         # Note (kentang-mit@): image start / end is not implemented here to support pretraining.
         if getattr(self.config, "turn_mm_projector", False) and getattr(self.config, "mm_use_im_start_end", False):
             raise NotImplementedError
