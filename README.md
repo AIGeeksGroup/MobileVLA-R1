@@ -1,5 +1,9 @@
 # <img src="./assets/mobilevlar1_logo.png" alt="logo" width="40"/> MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots
 
+> [!NOTE]
+> [**MobileVLA-R1 2.0**](https://aigeeksgroup.github.io/MobileVLA-R1-2.0/) is out! Structured reasoning and GRPO bring more reliable mobile robot control. 🤖
+
+
 This is the official repository for the paper:
 > **MobileVLA-R1: Reinforcing Vision-Language-Action for Mobile Robots**
 >
